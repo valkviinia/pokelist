@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pokédex & Catch List</title>
+<style>
+  :root { --bg:#12151c; --card:#1c2130; --accent:#ee4b4b; --ok:#3ecf8e; --text:#e8ebf2; --muted:#8b93a7; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  header { position:sticky; top:0; z-index:10; background:#0d1016; padding:.8rem 1rem; display:flex; flex-wrap:wrap; gap:.8rem; align-items:center; border-bottom:1px solid #2a3042; }
+  header h1 { font-size:1.2rem; margin:0 1rem 0 0; }
+  nav button { background:none; border:1px solid #2a3042; color:var(--text); padding:.5rem 1rem; cursor:pointer; border-radius:.5rem; }
+  nav button.active { background:var(--accent); border-color:var(--accent); }
+  #search { flex:1; min-width:180px; padding:.5rem .8rem; border-radius:.5rem; border:1px solid #2a3042; background:var(--card); color:var(--text); }
+  main { padding:1rem; max-width:1400px; margin:auto; }
+  h2 { margin:1.5rem 0 .6rem; border-bottom:2px solid var(--accent); padding-bottom:.3rem; }
+  h2 small { color:var(--muted); font-weight:normal; font-size:.8rem; margin-left:.5rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:.6rem; }
+  .card { background:var(--card); border:2px solid transparent; border-radius:.6rem; padding:.5rem; text-align:center; cursor:pointer; color:var(--text); font:inherit; position:relative; }
+  .card:hover { border-color:#3a4260; }
+  .card.selected { border-color:var(--accent); }
+  .card.selected::after { content:"✓"; position:absolute; top:.3rem; right:.5rem; color:var(--accent); font-weight:bold; }
+  .card img { width:80px; height:80px; image-rendering:pixelated; }
+  .num { color:var(--muted); font-size:.75rem; display:block; }
+  .name { font-size:.85rem; display:block; word-break:break-word; }
+  .card.caught { border-color:var(--ok); }
+  .card.caught img { opacity:.55; }
+  .card label { display:flex; align-items:center; justify-content:center; gap:.4rem; margin-top:.4rem; cursor:pointer; font-size:.8rem; }
+  .card .remove { position:absolute; top:.2rem; right:.3rem; background:none; border:none; color:var(--muted); cursor:pointer; font-size:1rem; }
+  .card.static { cursor:default; }
+  .progress { background:var(--card); border-radius:.6rem; padding:.8rem 1rem; margin-bottom:.5rem; }
+  .bar { height:.6rem; background:#2a3042; border-radius:1rem; overflow:hidden; margin-top:.5rem; }
+  .bar > div { height:100%; background:var(--ok); width:0; transition:width .2s; }
+  .empty, #status { color:var(--muted); padding:2rem 0; text-align:center; }
+  #bulk-add { background:var(--accent); border:none; color:#fff; padding:.5rem 1rem; border-radius:.5rem; cursor:pointer; font:inherit; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pokédex</h1>
+  <nav>
+    <button id="tab-dex" class="active">Pokédex</button>
+    <button id="tab-list">Catch List (<span id="count">0</span>)</button>
+  </nav>
+  <input id="search" type="search" placeholder="Name oder Nummer(n) suchen, z. B. 645, 637, 632 …">
+  <button id="bulk-add" class="hidden"></button>
+</header>
+<main>
+  <div id="status">Lade Pokédex …</div>
+  <div id="view-dex"></div>
+  <div id="view-list" class="hidden"></div>
+</main>
+
+<script>
+const REGIONS = [
+  ["Kanto", 1, 151], ["Johto", 152, 251], ["Hoenn", 252, 386], ["Sinnoh", 387, 493],
+  ["Einall", 494, 649], ["Kalos", 650, 721], ["Alola", 722, 809], ["Galar", 810, 905], ["Paldea", 906, 1025]
+];
+const TOTAL = 1025;
+const sprite = id => `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
+const pad = n => String(n).padStart(4, "0");
+const regionOf = id => REGIONS.find(([, a, b]) => id >= a && id <= b)[0];
+
+const load = k => { try { return new Set(JSON.parse(localStorage.getItem(k) || "[]")); } catch { return new Set(); } };
+const save = (k, s) => localStorage.setItem(k, JSON.stringify([...s]));
+let wanted = load("catchList"), caught = load("caught");
+let names = {}; // id -> Name
+
+async function loadNames() {
+  try { // ein einziger GraphQL-Request für alle deutschen Namen
+    const res = await fetch("https://beta.pokeapi.co/graphql/v1beta", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: `{ pokemon_v2_pokemonspecies(order_by:{id:asc}) {
+        id pokemon_v2_pokemonspeciesnames(where:{language_id:{_eq:6}}) { name } } }` })
+    });
+    const data = (await res.json()).data.pokemon_v2_pokemonspecies;
+    data.forEach(p => { if (p.pokemon_v2_pokemonspeciesnames[0]) names[p.id] = p.pokemon_v2_pokemonspeciesnames[0].name; });
+  } catch (e) { console.warn("Deutsche Namen nicht verfügbar, Fallback auf Englisch", e); }
+  if (Object.keys(names).length < TOTAL * 0.9) { // Fallback: englische Namen
+    const res = await fetch(`https://pokeapi.co/api/v2/pokemon-species?limit=${TOTAL}`);
+    const { results } = await res.json();
+    results.forEach((p, i) => { names[i + 1] ??= p.name.charAt(0).toUpperCase() + p.name.slice(1); });
+  }
+}
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const cardInner = id => `<img loading="lazy" src="${sprite(id)}" alt=""><span class="num">#${pad(id)}</span><span class="name">${esc(names[id] || "?")}</span>`;
+
+function renderDex() {
+  const root = document.getElementById("view-dex");
+  root.innerHTML = REGIONS.map(([r, a, b]) => {
+    let cards = "";
+    for (let id = a; id <= b; id++)
+      cards += `<button class="card ${wanted.has(id) ? "selected" : ""}" data-id="${id}" data-search="${esc((names[id] || "").toLowerCase())} ${id}">${cardInner(id)}</button>`;
+    return `<section data-region="${r}"><h2>${r}<small>#${pad(a)}–#${pad(b)}</small></h2><div class="grid">${cards}</div></section>`;
+  }).join("");
+  root.onclick = e => {
+    const card = e.target.closest(".card"); if (!card) return;
+    const id = +card.dataset.id;
+    if (wanted.has(id)) { wanted.delete(id); caught.delete(id); } else wanted.add(id);
+    card.classList.toggle("selected", wanted.has(id));
+    save("catchList", wanted); save("caught", caught); updateCount(); applyFilter();
+  };
+}
+
+function renderList() {
+  const root = document.getElementById("view-list");
+  if (!wanted.size) { root.innerHTML = `<div class="empty">Deine Catch List ist leer. Wähle im Pokédex Pokémon aus.</div>`; return; }
+  const done = [...wanted].filter(id => caught.has(id)).length;
+  let html = `<div class="progress"><strong>${done} / ${wanted.size}</strong> gefangen<div class="bar"><div style="width:${done / wanted.size * 100}%"></div></div></div>`;
+  for (const [r, a, b] of REGIONS) {
+    const ids = [...wanted].filter(id => id >= a && id <= b).sort((x, y) => x - y);
+    if (!ids.length) continue;
+    html += `<section data-region="${r}"><h2>${r}<small>${ids.filter(i => caught.has(i)).length}/${ids.length}</small></h2><div class="grid">` +
+      ids.map(id => `<div class="card static ${caught.has(id) ? "caught" : ""}" data-id="${id}" data-search="${esc((names[id] || "").toLowerCase())} ${id}">
+        <button class="remove" title="Entfernen" data-remove="${id}">×</button>${cardInner(id)}
+        <label><input type="checkbox" data-catch="${id}" ${caught.has(id) ? "checked" : ""}> Gefangen</label></div>`).join("") +
+      `</div></section>`;
+  }
+  root.innerHTML = html;
+  applyFilter();
+}
+
+document.getElementById("view-list").addEventListener("click", e => {
+  const rm = e.target.dataset.remove, ck = e.target.dataset.catch;
+  if (rm) { wanted.delete(+rm); caught.delete(+rm); }
+  else if (ck) { e.target.checked ? caught.add(+ck) : caught.delete(+ck); }
+  else return;
+  save("catchList", wanted); save("caught", caught); updateCount(); renderList();
+  if (rm) document.querySelector(`#view-dex [data-id="${rm}"]`)?.classList.remove("selected");
+});
+
+function updateCount() { document.getElementById("count").textContent = wanted.size; }
+
+const searchEl = document.getElementById("search");
+const bulkBtn = document.getElementById("bulk-add");
+
+// Mehrere Zahlen ("645, 637 #632") -> Set gültiger IDs, sonst null
+function parseIds(raw) {
+  const tokens = raw.split(/[\s,;]+/).filter(Boolean);
+  if (tokens.length < 2 || !tokens.every(t => /^#?\d+$/.test(t))) return null;
+  return new Set(tokens.map(t => +t.replace("#", "")).filter(n => n >= 1 && n <= TOTAL));
+}
+
+function applyFilter() {
+  const raw = searchEl.value.trim().toLowerCase();
+  const ids = parseIds(raw);
+  const q = raw.replace(/^#/, "");
+  const view = document.querySelector("main > div:not(.hidden):not(#status)");
+  if (!view) { bulkBtn.classList.add("hidden"); return; }
+
+  view.querySelectorAll(".card").forEach(c => {
+    const hit = ids ? ids.has(+c.dataset.id) : (!q || c.dataset.search.includes(q));
+    c.classList.toggle("hidden", !hit);
+  });
+  view.querySelectorAll("section").forEach(s => s.classList.toggle("hidden", !s.querySelector(".card:not(.hidden)")));
+
+  const open = ids && view.id === "view-dex" ? [...ids].filter(id => !wanted.has(id)) : [];
+  bulkBtn.classList.toggle("hidden", !open.length);
+  bulkBtn.textContent = `${open.length} zur Liste hinzufügen`;
+}
+
+function bulkAdd() {
+  const ids = parseIds(searchEl.value.trim().toLowerCase());
+  if (!ids) return;
+  ids.forEach(id => {
+    wanted.add(id);
+    document.querySelector(`#view-dex [data-id="${id}"]`)?.classList.add("selected");
+  });
+  save("catchList", wanted); updateCount(); applyFilter();
+}
+
+searchEl.addEventListener("input", applyFilter);
+searchEl.addEventListener("keydown", e => { if (e.key === "Enter") bulkAdd(); });
+bulkBtn.addEventListener("click", bulkAdd);
+
+function show(tab) {
+  const dex = tab === "dex";
+  document.getElementById("view-dex").classList.toggle("hidden", !dex);
+  document.getElementById("view-list").classList.toggle("hidden", dex);
+  document.getElementById("tab-dex").classList.toggle("active", dex);
+  document.getElementById("tab-list").classList.toggle("active", !dex);
+  if (!dex) renderList();
+  applyFilter();
+}
+document.getElementById("tab-dex").onclick = () => show("dex");
+document.getElementById("tab-list").onclick = () => show("list");
+
+(async () => {
+  try {
+    await loadNames();
+    document.getElementById("status").remove();
+    renderDex(); updateCount();
+  } catch (e) {
+    document.getElementById("status").textContent = "Pokédex konnte nicht geladen werden (Internetverbindung?).";
+    console.error(e);
+  }
+})();
+</script>
+</body>
+</html>
